@@ -6,6 +6,7 @@ import cookieParser from "cookie-parser";
 import { env } from "./config/env.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import authRoutes from "./routes/authRoutes.js";
+import meetingRoutes from "./routes/meetingRoutes.js";
 
 import { requestLogger } from "./middleware/requestLogger.js";
 import { notFound } from "./middleware/notFound.js";
@@ -50,6 +51,8 @@ app.use("/api/v1/health", healthRoutes);
 
 // Authentication routes.
 app.use("/api/v1/auth", authRoutes);
+
+app.use("/api/v1/meetings", meetingRoutes);
 
 // Keep these middleware at the end.
 app.use(notFound);
