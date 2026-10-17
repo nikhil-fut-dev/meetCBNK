@@ -4,6 +4,8 @@ import { Server } from "socket.io";
 import app from "./app.js";
 import { env } from "./config/env.js";
 import { connectDatabase } from "./config/db.js";
+import { socketAuth } from "./middleware/socketAuth.js";
+import { registerMeetingSocket } from "./sockets/meetingSocket.js";
 
 const httpServer = http.createServer(app);
 
@@ -15,8 +17,15 @@ const io = new Server(httpServer, {
   },
 });
 
+// Authenticate every Socket.IO connection.
+io.use(socketAuth);
+
+registerMeetingSocket(io);
+
 io.on("connection", (socket) => {
-  console.log(`Socket connected: ${socket.id}`);
+  console.log(
+    `Authenticated socket connected: ${socket.data.user.username} (${socket.id})`,
+  );
 
   socket.on("disconnect", (reason) => {
     console.log(`Socket disconnected: ${socket.id} (${reason})`);

@@ -34,6 +34,12 @@ const meetingScheduleSchema = new mongoose.Schema(
       type: Date,
       required: true,
       index: true,
+      validate: {
+        validator(value) {
+          return value instanceof Date && !Number.isNaN(value.getTime());
+        },
+        message: "A valid scheduled date and time is required.",
+      },
     },
 
     durationMinutes: {

@@ -107,6 +107,46 @@ meetingSchema.pre("validate", function () {
   }
 });
 
+meetingSchema.pre("validate", function () {
+  const participants = this.participants ?? [];
+  const seenUsers = new Set();
+  let activeCount = 0;
+
+  for (const participant of participants) {
+    const userId = participant.user?.toString();
+
+    if (!userId) {
+      continue;
+    }
+
+    // A user should have only one participant record.
+    if (seenUsers.has(userId)) {
+      this.invalidate(
+        "participants",
+        "A user cannot have duplicate participant records.",
+      );
+      break;
+    }
+
+    seenUsers.add(userId);
+
+    if (!participant.leftAt) {
+      activeCount += 1;
+    }
+  }
+
+  // The host counts toward the participant limit.
+  if (
+    Number.isInteger(this.maxParticipants) &&
+    activeCount > this.maxParticipants
+  ) {
+    this.invalidate(
+      "participants",
+      "Active participants cannot exceed maxParticipants.",
+    );
+  }
+});
+
 meetingSchema.index({ host: 1, createdAt: -1 });
 meetingSchema.index({ scheduledAt: 1, status: 1 });
 

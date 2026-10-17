@@ -221,25 +221,46 @@ export const getMeetingById = asyncHandler(async (req, res) => {
   });
 });
 
-// PATCH /api/v1/meetings/:meetingId/start
+/**
+ * PATCH /api/v1/meetings/:meetingId/start
+ */
 export const startMeeting = asyncHandler(async (req, res) => {
   const meetingId = parseMeetingId(req.params.meetingId);
 
-  const meeting = await Meeting.findOne({
-    _id: meetingId,
-    host: req.user._id,
-  });
+  const now = new Date();
+
+  // Atomic status check prevents starting the same meeting twice.
+  const meeting = await Meeting.findOneAndUpdate(
+    {
+      _id: meetingId,
+      host: req.user._id,
+      status: "scheduled",
+    },
+    {
+      $set: {
+        status: "live",
+        startedAt: now,
+        endedAt: null,
+      },
+    },
+    { new: true },
+  );
 
   if (!meeting) {
-    throw new ApiError(404, "Meeting not found.");
-  }
+    const existingMeeting = await Meeting.findById(meetingId);
 
-  if (meeting.status !== "scheduled") {
+    if (!existingMeeting) {
+      throw new ApiError(404, "Meeting not found.");
+    }
+
+    if (!existingMeeting.host.equals(req.user._id)) {
+      throw new ApiError(403, "Only the host can start this meeting.");
+    }
+
     throw new ApiError(409, "Only scheduled meetings can be started.");
   }
 
-  const now = new Date();
-
+  // Add or reactivate the host participant record.
   const hostParticipant = meeting.participants.find((participant) =>
     participant.user.equals(req.user._id),
   );
@@ -256,10 +277,6 @@ export const startMeeting = asyncHandler(async (req, res) => {
       leftAt: null,
     });
   }
-
-  meeting.status = "live";
-  meeting.startedAt = now;
-  meeting.endedAt = null;
 
   await meeting.save();
 
@@ -302,9 +319,15 @@ export const endMeeting = asyncHandler(async (req, res) => {
   await meeting.save();
 
   // Update the associated schedule, if one exists.
+
   await MeetingSchedule.findOneAndUpdate(
-    { meeting: meeting._id },
-    { status: "completed" },
+    {
+      meeting: meeting._id,
+      status: { $ne: "cancelled" },
+    },
+    {
+      $set: { status: "completed" },
+    },
   );
 
   return res.status(200).json({
@@ -314,12 +337,14 @@ export const endMeeting = asyncHandler(async (req, res) => {
   });
 });
 
-// PATCH /api/v1/meetings/:meetingId/cancel
+/**
+ * PATCH /api/v1/meetings/:meetingId/cancel
+ */
 export const cancelMeeting = asyncHandler(async (req, res) => {
-  parseMeetingId(req.params.meetingId);
+  const meetingId = parseMeetingId(req.params.meetingId);
 
   const meeting = await Meeting.findOne({
-    _id: req.params.meetingId,
+    _id: meetingId,
     host: req.user._id,
   });
 
@@ -335,8 +360,14 @@ export const cancelMeeting = asyncHandler(async (req, res) => {
   await meeting.save();
 
   await MeetingSchedule.updateOne(
-    { meeting: meeting._id, host: req.user._id },
-    { $set: { status: "cancelled" } },
+    {
+      meeting: meeting._id,
+      host: req.user._id,
+      status: "scheduled",
+    },
+    {
+      $set: { status: "cancelled" },
+    },
   );
 
   return res.status(200).json({
@@ -353,7 +384,6 @@ export const cancelMeeting = asyncHandler(async (req, res) => {
 export const joinMeeting = asyncHandler(async (req, res) => {
   const { meetingCode } = req.body ?? {};
 
-  // 1. Validate the meeting code.
   if (typeof meetingCode !== "string") {
     throw new ApiError(400, "A valid meeting code is required.");
   }
@@ -364,7 +394,9 @@ export const joinMeeting = asyncHandler(async (req, res) => {
     throw new ApiError(400, "A valid meeting code is required.");
   }
 
-  // 2. Find the meeting.
+  const userId = req.user._id;
+
+  // Find the meeting before attempting the atomic update.
   const meeting = await Meeting.findOne({
     meetingCode: normalizedCode,
   });
@@ -373,9 +405,8 @@ export const joinMeeting = asyncHandler(async (req, res) => {
     throw new ApiError(404, "Meeting not found.");
   }
 
-  const isHost = meeting.host.equals(req.user._id);
+  const isHost = meeting.host.equals(userId);
 
-  // 3. Reject meetings that cannot be joined.
   if (["ended", "cancelled"].includes(meeting.status)) {
     throw new ApiError(409, "This meeting has ended or been cancelled.");
   }
@@ -387,28 +418,12 @@ export const joinMeeting = asyncHandler(async (req, res) => {
     );
   }
 
-  // 4. Check whether the user already has a participant record.
   const existingParticipant = meeting.participants.find((participant) =>
-    participant.user.equals(req.user._id),
+    participant.user.equals(userId),
   );
 
-  // Handle an already-active participant.
+  // An already-active user can retry without consuming another slot.
   if (existingParticipant && !existingParticipant.leftAt) {
-    // If the host is active but the meeting is still scheduled,
-    // ensure the meeting is started.
-    if (isHost && meeting.status === "scheduled") {
-      meeting.status = "live";
-      meeting.startedAt = new Date();
-
-      await meeting.save();
-
-      return res.status(200).json({
-        success: true,
-        message: "Meeting started successfully.",
-        meeting: publicMeeting(meeting),
-      });
-    }
-
     return res.status(200).json({
       success: true,
       message: "You are already in this meeting.",
@@ -416,53 +431,182 @@ export const joinMeeting = asyncHandler(async (req, res) => {
     });
   }
 
-  // 5. Count active participants.
-  const activeParticipants = meeting.participants.filter(
-    (participant) => !participant.leftAt,
-  );
-
-  const hostAlreadyActive = activeParticipants.some((participant) =>
-    participant.user.equals(meeting.host),
-  );
-
-  const hostJoining = isHost && !hostAlreadyActive;
-
-  if (activeParticipants.length >= meeting.maxParticipants && !hostJoining) {
-    throw new ApiError(409, "Meeting is full.");
-  }
-
   const now = new Date();
 
-  // 6. Reactivate an existing record or create a new one.
-  if (existingParticipant) {
-    existingParticipant.joinedAt = now;
-    existingParticipant.leftAt = null;
-    existingParticipant.role = isHost ? "host" : "participant";
-  } else {
-    meeting.participants.push({
-      user: req.user._id,
-      role: isHost ? "host" : "participant",
-      joinedAt: now,
-      leftAt: null,
-    });
-  }
+  const participantData = {
+    user: userId,
+    role: isHost ? "host" : "participant",
+    joinedAt: now,
+    leftAt: null,
+  };
 
-  // 7. Automatically start when the host joins.
-  if (isHost && meeting.status === "scheduled") {
-    meeting.status = "live";
-    meeting.startedAt = now;
-    meeting.endedAt = null;
-  }
+  /*
+   * Count active participants inside MongoDB.
+   * The capacity condition and participant update are atomic
+   * because they operate on the same meeting document.
+   */
+  const activeParticipantsExpression = {
+    $filter: {
+      input: { $ifNull: ["$participants", []] },
+      as: "participant",
+      cond: {
+        $eq: [{ $ifNull: ["$$participant.leftAt", null] }, null],
+      },
+    },
+  };
 
-  // 8. Save changes.
-  await meeting.save();
+  const updatedMeeting = await Meeting.findOneAndUpdate(
+    {
+      _id: meeting._id,
+
+      // A host may start a scheduled meeting; others join live meetings.
+      status: isHost ? { $in: ["scheduled", "live"] } : "live",
+
+      $expr: {
+        $or: [
+          // Allow an existing active user to retry safely.
+          {
+            $in: [
+              userId,
+              {
+                $map: {
+                  input: activeParticipantsExpression,
+                  as: "participant",
+                  in: "$$participant.user",
+                },
+              },
+            ],
+          },
+
+          // Otherwise, a free participant slot must exist.
+          {
+            $lt: [{ $size: activeParticipantsExpression }, "$maxParticipants"],
+          },
+        ],
+      },
+    },
+
+    [
+      {
+        $set: {
+          participants: {
+            $cond: [
+              {
+                $in: [
+                  userId,
+                  {
+                    $map: {
+                      input: { $ifNull: ["$participants", []] },
+                      as: "participant",
+                      in: "$$participant.user",
+                    },
+                  },
+                ],
+              },
+
+              // Reactivate the user's existing participant record.
+              {
+                $map: {
+                  input: { $ifNull: ["$participants", []] },
+                  as: "participant",
+                  in: {
+                    $cond: [
+                      { $eq: ["$$participant.user", userId] },
+                      {
+                        $mergeObjects: ["$$participant", participantData],
+                      },
+                      "$$participant",
+                    ],
+                  },
+                },
+              },
+
+              // Add a new participant when no record exists.
+              {
+                $concatArrays: [
+                  { $ifNull: ["$participants", []] },
+                  [participantData],
+                ],
+              },
+            ],
+          },
+
+          status: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$host", userId] },
+                  { $eq: ["$status", "scheduled"] },
+                ],
+              },
+              "live",
+              "$status",
+            ],
+          },
+
+          startedAt: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$host", userId] },
+                  { $eq: ["$status", "scheduled"] },
+                ],
+              },
+              now,
+              "$startedAt",
+            ],
+          },
+
+          endedAt: {
+            $cond: [
+              {
+                $and: [
+                  { $eq: ["$host", userId] },
+                  { $eq: ["$status", "scheduled"] },
+                ],
+              },
+              null,
+              "$endedAt",
+            ],
+          },
+        },
+      },
+    ],
+
+    { new: true },
+  );
+
+  if (!updatedMeeting) {
+    // Re-read to return the appropriate error for a concurrent change.
+    const latestMeeting = await Meeting.findById(meeting._id);
+
+    if (!latestMeeting) {
+      throw new ApiError(404, "Meeting not found.");
+    }
+
+    if (["ended", "cancelled"].includes(latestMeeting.status)) {
+      throw new ApiError(409, "This meeting has ended or been cancelled.");
+    }
+
+    if (!isHost && latestMeeting.status !== "live") {
+      throw new ApiError(
+        409,
+        "This meeting is not currently accepting participants.",
+      );
+    }
+
+    throw new ApiError(
+      409,
+      "Meeting is full or your join request conflicted. Please try again.",
+    );
+  }
 
   return res.status(200).json({
     success: true,
     message: isHost
       ? "You joined the meeting successfully."
       : "Meeting joined successfully.",
-    meeting: publicMeeting(meeting),
+    meeting: publicMeeting(updatedMeeting),
   });
 });
 
@@ -478,19 +622,25 @@ export const leaveMeeting = asyncHandler(async (req, res) => {
     throw new ApiError(404, "Meeting not found.");
   }
 
+  const userId = req.user._id;
+  const isHost = meeting.host.equals(userId);
+
   const participant = meeting.participants.find(
-    (item) => item.user.toString() === req.user._id.toString() && !item.leftAt,
+    (item) => item.user.equals(userId) && !item.leftAt,
   );
 
   if (!participant) {
     throw new ApiError(409, "You are not an active participant.");
   }
 
-  const now = new Date();
-  const isHost = meeting.host.toString() === req.user._id.toString();
+  if (meeting.status !== "live") {
+    throw new ApiError(409, "Only participants in a live meeting can leave.");
+  }
 
-  if (isHost && meeting.status === "live") {
-    // MVP rule: when the host leaves, the meeting ends.
+  const now = new Date();
+
+  if (isHost) {
+    // Host leaving ends the live meeting.
     meeting.status = "ended";
     meeting.endedAt = now;
 
@@ -500,23 +650,30 @@ export const leaveMeeting = asyncHandler(async (req, res) => {
       }
     }
   } else {
-    // A normal participant leaves without ending the meeting.
+    // A normal participant leaving does not end the meeting.
     participant.leftAt = now;
   }
 
   await meeting.save();
 
-  await MeetingSchedule.findOneAndUpdate(
-    { meeting: meeting._id },
-    { status: "completed" },
-  );
+  // Only update the schedule when the meeting actually ended.
+  if (isHost) {
+    await MeetingSchedule.updateOne(
+      {
+        meeting: meeting._id,
+        status: { $ne: "cancelled" },
+      },
+      {
+        $set: { status: "completed" },
+      },
+    );
+  }
 
   return res.status(200).json({
     success: true,
-    message:
-      isHost && meeting.status === "ended"
-        ? "Host left. Meeting has ended."
-        : "You left the meeting successfully.",
+    message: isHost
+      ? "Host left. Meeting has ended."
+      : "You left the meeting successfully.",
     meeting: publicMeeting(meeting),
   });
 });
