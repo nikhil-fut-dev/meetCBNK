@@ -71,3 +71,4 @@ export async function socketAuth(socket, next) {
     return next(new Error("Socket authentication failed."));
   }
 }
+

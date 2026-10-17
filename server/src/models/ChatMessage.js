@@ -35,3 +35,4 @@ chatMessageSchema.index({ meeting: 1, createdAt: -1 });
 const ChatMessage = mongoose.model("ChatMessage", chatMessageSchema);
 
 export default ChatMessage;
+

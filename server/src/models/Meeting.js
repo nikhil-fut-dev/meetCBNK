@@ -153,3 +153,4 @@ meetingSchema.index({ scheduledAt: 1, status: 1 });
 const Meeting = mongoose.model("Meeting", meetingSchema);
 
 export default Meeting;
+
