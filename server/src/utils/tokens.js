@@ -63,10 +63,12 @@ export function verifyRefreshToken(token) {
 }
 
 function cookieBaseOptions() {
+  const isProduction = env.nodeEnv === "production";
+
   return {
     httpOnly: true,
-    secure: env.cookieSecure,
-    sameSite: "lax",
+    secure: isProduction || env.cookieSecure,
+    sameSite: isProduction ? "none" : "lax",
     path: "/",
   };
 }
