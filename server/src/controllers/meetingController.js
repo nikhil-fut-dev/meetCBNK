@@ -243,7 +243,10 @@ export const startMeeting = asyncHandler(async (req, res) => {
         endedAt: null,
       },
     },
-    { new: true },
+    {
+      new: true,
+      updatePipeline: true,
+    },
   );
 
   if (!meeting) {
@@ -573,7 +576,10 @@ export const joinMeeting = asyncHandler(async (req, res) => {
       },
     ],
 
-    { new: true },
+    {
+      new: true,
+      updatePipeline: true,
+    },
   );
 
   if (!updatedMeeting) {
@@ -677,4 +683,3 @@ export const leaveMeeting = asyncHandler(async (req, res) => {
     meeting: publicMeeting(meeting),
   });
 });
-

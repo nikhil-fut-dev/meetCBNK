@@ -190,6 +190,7 @@ export function registerMeetingSocket(io) {
         socket.to(roomName).emit("meeting:participant-joined", {
           user: getSenderPayload(socket.data.user),
           meetingId,
+          socketId: socket.id,
         });
 
         return acknowledge?.({
@@ -283,7 +284,24 @@ export function registerMeetingSocket(io) {
             }
           }
 
+          // Keep the existing unique user list for compatibility.
           const participants = Array.from(uniqueParticipants.values());
+
+          // Also expose each active socket connection for WebRTC signaling.
+          // A user may have more than one browser tab/device connected.
+          const connections = roomSockets
+            .filter((roomSocket) => roomSocket.data.user?.id)
+            .map((roomSocket) => {
+              const user = roomSocket.data.user;
+
+              return {
+                socketId: roomSocket.id,
+                id: user.id,
+                fullName: user.fullName,
+                username: user.username,
+                isHost: isHost(meeting, user.id),
+              };
+            });
 
           return respond({
             success: true,
@@ -292,6 +310,7 @@ export function registerMeetingSocket(io) {
               meetingId,
               total: participants.length,
               participants,
+              connections,
             },
           });
         } catch (error) {
@@ -1494,4 +1513,3 @@ export function registerMeetingSocket(io) {
     });
   });
 }
-
